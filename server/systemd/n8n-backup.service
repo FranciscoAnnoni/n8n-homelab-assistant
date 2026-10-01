@@ -1,0 +1,8 @@
+[Unit]
+Description=skynet: backup local de n8n
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/n8n-backup
+Nice=10

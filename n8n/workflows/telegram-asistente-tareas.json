@@ -1,0 +1,573 @@
+{
+  "name": "Telegram asistente + tareas",
+  "description": "Bot de Telegram (texto o audio) que responde con Groq y administra la lista de tareas en Postgres (base tareas).",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {
+          "chatIds": "TU_CHAT_ID",
+          "userIds": "TU_USER_ID"
+        }
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        -416,
+        0
+      ],
+      "id": "639f284f-a931-47f1-a26e-d5f927043341",
+      "name": "Telegram Trigger",
+      "webhookId": "056eb982-62fe-4790-8c84-9564399fc693",
+      "credentials": {
+        "telegramApi": {
+          "id": "CONFIGURAR",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $('Telegram Trigger').item.json.message.voice?.file_id ?? $('Telegram Trigger').item.json.message.audio?.file_id ?? '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "¿Es audio?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        0
+      ],
+      "id": "c1000000-0000-4000-8000-000000000002"
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $('Telegram Trigger').item.json.message.voice?.file_id ?? $('Telegram Trigger').item.json.message.audio?.file_id }}",
+        "additionalFields": {}
+      },
+      "name": "Descargar audio",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        32,
+        -160
+      ],
+      "id": "c1000000-0000-4000-8000-000000000003",
+      "webhookId": "93d6a5ba-f233-438c-8452-647ef2e4fb68",
+      "credentials": {
+        "telegramApi": {
+          "id": "CONFIGURAR",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Groq rechaza la extension .oga de Telegram; el audio es OGG/Opus igual\n$input.item.binary.data.fileName = 'audio.ogg';\n$input.item.binary.data.mimeType = 'audio/ogg';\nreturn $input.item;"
+      },
+      "name": "Renombrar a .ogg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -272
+      ],
+      "id": "c1000000-0000-4000-8000-000000000004"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "model",
+              "value": "whisper-large-v3-turbo"
+            },
+            {
+              "name": "language",
+              "value": "es"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "Transcribir (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        -288
+      ],
+      "id": "c1000000-0000-4000-8000-000000000005",
+      "credentials": {
+        "groqApi": {
+          "id": "CONFIGURAR",
+          "name": "Groq account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000011",
+              "name": "texto",
+              "type": "string",
+              "value": "={{ $('Telegram Trigger').item.json.message.text ?? $json.text?.trim() ?? '(el usuario mandó algo que no es texto ni audio)' }}"
+            },
+            {
+              "id": "c1000000-0000-4000-8000-000000000012",
+              "name": "es_audio",
+              "type": "boolean",
+              "value": "={{ !$('Telegram Trigger').item.json.message.text && !!$json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Texto",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        0
+      ],
+      "id": "c1000000-0000-4000-8000-000000000006"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*) AS n, coalesce(string_agg('#' || id || ' ' || text, E'\\n' ORDER BY id), '(ninguna)') AS lista FROM tasks",
+        "options": {}
+      },
+      "name": "Leer tareas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        912,
+        0
+      ],
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Texto').item.json.texto }}",
+        "options": {
+          "systemMessage": "=Sos el asistente personal de Fran por Telegram. Respondé en español, claro y conciso, en texto plano: sin tablas, sin markdown, sin asteriscos y sin emojis.\n\nPodés charlar y responder cualquier pregunta normalmente. Además administrás una lista de tareas pendientes (compartida, máximo 20).\n\nUsá las herramientas SOLO cuando el usuario hable de sus tareas, por ejemplo:\n- \"recordame...\", \"anotá...\", \"quiero poner un recordatorio\", \"tengo que hacer X (para tal día)\": agregar_tareas. Si menciona un día, incluilo en el texto de la tarea.\n- \"terminé / hice / ya está X\", o el reporte de fin de día: completar_tareas con los IDs de las terminadas. Las que quedaron pendientes NO se tocan (ya están en la lista). Las tareas nuevas que mencione se agregan con agregar_tareas.\n- \"cambiá / corregí la tarea X\": editar_tarea.\n- Preguntas sobre la lista (\"qué tengo pendiente\"): respondé con la lista de abajo, no hace falta herramienta.\nSi no está claro a qué tarea se refiere, preguntá antes de borrar.\n\nSi agregar_tareas devuelve resultado TOPE, no se agregó nada: decile que llegó al máximo de 20 y que tiene que resolver o borrar algunas antes de agregar más, y mostrale cuántas tiene.\n\nDespués de usar una herramienta, confirmá qué cambió con los IDs (ej: \"Borré #12 y #15. Agregué #21 Llamar al banco.\").\n\nFecha y hora actual: {{ $now.setZone('America/Argentina/Buenos_Aires').toFormat(\"cccc d 'de' LLLL yyyy, HH:mm\", { locale: 'es' }) }}\n\nTareas pendientes ({{ $('Leer tareas').item.json.n }}/20):\n{{ $('Leer tareas').item.json.lista }}\n\nEsta lista es la del inicio del mensaje; si usaste herramientas, tené en cuenta los cambios.",
+          "maxIterations": 6,
+          "enableStreaming": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "67cf0fac-eb36-4443-b340-19bafbca32b4",
+      "name": "AI Agent",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "maxTokensToSample": 1500,
+          "temperature": 0.2
+        }
+      },
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        224
+      ],
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "credentials": {
+        "groqApi": {
+          "id": "CONFIGURAR",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ 'tg-' + $('Telegram Trigger').item.json.message.chat.id }}"
+      },
+      "name": "Memoria",
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.4,
+      "position": [
+        1200,
+        224
+      ],
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Agrega una o varias tareas a la lista de pendientes. Si el total superaría 20, no agrega ninguna y devuelve resultado TOPE.",
+        "operation": "executeQuery",
+        "query": "WITH nuevas AS (\n  SELECT trim(t) AS text FROM unnest(string_to_array($1, E'\\n')) AS t WHERE trim(t) <> ''\n), cnt AS (\n  SELECT (SELECT count(*) FROM tasks) AS actuales, (SELECT count(*) FROM nuevas) AS n\n), ins AS (\n  INSERT INTO tasks (text) SELECT text FROM nuevas WHERE (SELECT actuales + n FROM cnt) <= 20 RETURNING id, text\n)\nSELECT CASE WHEN (SELECT actuales + n FROM cnt) <= 20 THEN 'OK' ELSE 'TOPE' END AS resultado,\n       (SELECT actuales FROM cnt) AS pendientes_antes,\n       (SELECT json_agg(ins) FROM ins) AS agregadas",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('tareas', 'Texto de cada tarea a agregar, una por línea (separadas por salto de línea)', 'string') ] }}"
+        }
+      },
+      "name": "agregar_tareas",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1360,
+        224
+      ],
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Marca tareas como terminadas y las borra de la lista. Recibe los IDs.",
+        "operation": "executeQuery",
+        "query": "WITH del AS (\n  DELETE FROM tasks WHERE id = ANY (regexp_split_to_array(regexp_replace($1, '[^0-9,]', '', 'g'), ',')::int[]) RETURNING id, text\n)\nSELECT count(*) AS borradas, json_agg(del) AS detalle FROM del",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('ids', 'IDs numéricos de las tareas terminadas, separados por coma. Ej: 12,15', 'string') ] }}"
+        }
+      },
+      "name": "completar_tareas",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1520,
+        224
+      ],
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Cambia el texto de una tarea existente.",
+        "operation": "executeQuery",
+        "query": "WITH upd AS (\n  UPDATE tasks SET text = $2 WHERE id = $1::int RETURNING id, text\n)\nSELECT count(*) AS editadas, json_agg(upd) AS detalle FROM upd",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('id', 'ID numérico de la tarea a editar', 'number'), $fromAI('texto', 'Nuevo texto completo de la tarea', 'string') ] }}"
+        }
+      },
+      "name": "editar_tarea",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1680,
+        224
+      ],
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ (($('Texto').item.json.es_audio ? 'Escuché: \"' + $('Texto').item.json.texto + '\"\\n\\n' : '') + $json.output).slice(0, 4000).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML",
+          "reply_to_message_id": "={{ $('Telegram Trigger').item.json.message.message_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1504,
+        -96
+      ],
+      "id": "3fcda100-9c0d-4a64-9573-65e5fd58b4bb",
+      "name": "Send a text message",
+      "webhookId": "492f46da-0e8d-4ca3-a641-8850b47075ea",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "telegramApi": {
+          "id": "CONFIGURAR",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=⚠️ Algo falló procesando el mensaje. Probá de nuevo en un rato.\n{{ String($json.error?.message ?? $json.error ?? \"\").slice(0, 300).replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\") }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML",
+          "reply_to_message_id": "={{ $('Telegram Trigger').item.json.message.message_id }}"
+        }
+      },
+      "id": "7ce94ab3-3fb7-4402-92c1-e2de9813e1fe",
+      "name": "Avisar error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1488,
+        -272
+      ],
+      "webhookId": "ef893002-aeef-4a86-b595-d247fb5b0037",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "telegramApi": {
+          "id": "CONFIGURAR",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "¿Es audio?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer tareas": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Memoria": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "agregar_tareas": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "completar_tareas": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "editar_tarea": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Es audio?": {
+      "main": [
+        [
+          {
+            "node": "Descargar audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar audio": {
+      "main": [
+        [
+          {
+            "node": "Renombrar a .ogg",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Renombrar a .ogg": {
+      "main": [
+        [
+          {
+            "node": "Transcribir (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcribir (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Texto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto": {
+      "main": [
+        [
+          {
+            "node": "Leer tareas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all"
+  }
+}

@@ -1,0 +1,7 @@
+[Unit]
+Description=skynet: chequeo de red WiFi y auto-reparación
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/skynet-netwatch

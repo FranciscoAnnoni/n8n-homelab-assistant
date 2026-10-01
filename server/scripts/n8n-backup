@@ -1,0 +1,38 @@
+#!/bin/bash
+# n8n-backup — backup local de n8n (skynet). Timer diario 03:30 (n8n-backup.timer).
+#   Contenido: pg_dump (formato custom), export de workflows y credenciales (encriptadas), .env y compose.yaml
+#   Destino:   /opt/backups/n8n/n8n-YYYY-MM-DD_HHMM[-weekly].tar.gz  (chmod 600)
+#   Retención: diarios 7 días, semanales (domingo) 29 días
+# Restaurar: ver PLAN-SERVER-SKYNET.md → "Restaurar n8n"
+set -euo pipefail
+STACK=/opt/stacks/n8n
+DEST=/opt/backups/n8n
+log() { logger -t n8n-backup "$*"; echo "$*"; }
+trap 'log "ERROR: backup falló (línea $LINENO)"' ERR
+
+mkdir -p "$DEST"; chmod 700 "$DEST"
+cd "$STACK"
+# shellcheck disable=SC1091
+set -a; . ./.env; set +a
+
+suffix=""; [ "$(date +%u)" = 7 ] && suffix="-weekly"
+name="n8n-$(date +%F_%H%M)${suffix}"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"; rm -rf "$STACK/data/n8n/_export"' EXIT
+
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc > "$tmp/db.dump"
+
+rm -rf data/n8n/_export
+docker compose exec -T -u node n8n sh -c 'mkdir -p /home/node/.n8n/_export/workflows /home/node/.n8n/_export/credentials &&
+  n8n export:workflow --backup --output=/home/node/.n8n/_export/workflows/ >/dev/null 2>&1 || true
+  n8n export:credentials --backup --output=/home/node/.n8n/_export/credentials/ >/dev/null 2>&1 || true'
+cp -r data/n8n/_export "$tmp/export"
+cp .env compose.yaml "$tmp/"
+
+tar -C "$tmp" -czf "$DEST/$name.tar.gz" .
+chmod 600 "$DEST/$name.tar.gz"
+
+find "$DEST" -name 'n8n-*.tar.gz' ! -name '*-weekly.tar.gz' -mtime +7 -delete
+find "$DEST" -name 'n8n-*-weekly.tar.gz' -mtime +29 -delete
+
+wf=$(find "$tmp/export/workflows" -name '*.json' | wc -l)
+log "OK $name.tar.gz ($(du -h "$DEST/$name.tar.gz" | cut -f1), db $(du -h "$tmp/db.dump" | cut -f1), $wf workflows). Backups guardados: $(ls "$DEST" | wc -l)"

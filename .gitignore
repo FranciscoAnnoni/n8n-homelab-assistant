@@ -1,0 +1,5 @@
+.env
+data/
+*.dump
+*.tar.gz
+.DS_Store

@@ -1,0 +1,13 @@
+[Unit]
+Description=skynet: cargar watchdog HW iTCO_wdt (blacklisteado por Ubuntu)
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe iTCO_wdt
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=skynet: chequeos de salud (server-alerts)
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/server-alerts
+Nice=10

@@ -1,0 +1,233 @@
+#!/bin/bash
+# server-alerts v2 — chequeos de salud de skynet. Corre como root cada 5 min (server-alerts.timer).
+#   Config: /etc/server-alerts.conf   Estado: /var/lib/server-alerts/
+#   Log:    /var/log/server-alerts.log  +  journalctl -t server-alerts
+# Uso:  server-alerts          → chequeos
+#       server-alerts --test   → mensaje de prueba (ignora cooldown)
+set -u
+export LC_ALL=C.UTF-8
+
+CONFIG=/etc/server-alerts.conf
+STATE_DIR=/var/lib/server-alerts
+LOG=/var/log/server-alerts.log
+
+TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""
+TEMP_THRESHOLD=80; DISK_THRESHOLD=90; INODE_THRESHOLD=90
+MEM_AVAIL_MIN_PCT=10; SWAP_USED_MAX_PCT=50; ALERT_COOLDOWN=3600
+PING_INTERNET="1.1.1.1"; DNS_TEST_HOST="supabase.com"
+KERNEL_IGNORE='PBLK|ACPI (BIOS )?Error|_OSC|AE_ALREADY_EXISTS|TPM|hp_bioscfg|VMX \(outside TXT\)|watchdog did not stop'
+HOSTNAME_TAG="$(hostname)"
+# shellcheck disable=SC1090
+[ -f "$CONFIG" ] && source "$CONFIG"
+
+mkdir -p "$STATE_DIR"; touch "$LOG"
+NL=$'\n'
+
+log() {
+  echo "[$(date '+%F %T')] $*" >> "$LOG"
+  logger -t server-alerts -- "$*"
+}
+
+telegram() {
+  [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || return 0
+  local resp
+  resp=$(curl -sS --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=[${HOSTNAME_TAG}] $1" 2>&1)
+  echo "$resp" | grep -q '"ok":true' || log "ERROR envío Telegram: ${resp:0:200}"
+}
+
+# alert <tipo> <mensaje>  — respeta cooldown por tipo
+alert() {
+  local type="$1" msg="$2" f="$STATE_DIR/last-alert-$1" now last
+  now=$(date +%s); last=$(cat "$f" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt "$ALERT_COOLDOWN" ] && return 0
+  echo "$now" > "$f"
+  log "ALERT[$type] $msg"
+  telegram "$msg"
+}
+# notice <tipo> <mensaje> — eventos únicos (sin cooldown): boots, recuperaciones
+notice() { log "INFO[$1] $2"; telegram "$2"; }
+clear_alert() { rm -f "$STATE_DIR/last-alert-$1"; }
+
+# ---------- CHECKS ----------
+
+check_boot() {
+  local boot_id last_boot prev_tail
+  boot_id=$(cat /proc/sys/kernel/random/boot_id)
+  last_boot=$(cat "$STATE_DIR/last-boot-id" 2>/dev/null || echo "")
+  [ "$boot_id" = "$last_boot" ] && return
+  echo "$boot_id" > "$STATE_DIR/last-boot-id"
+  [ -z "$last_boot" ] && { log "INFO[boot] baseline inicial (boot $boot_id)"; return; }
+
+  local when; when=$(uptime -s)
+  prev_tail=$(journalctl -b -1 --no-pager -o cat 2>/dev/null | tail -30)
+  if echo "$prev_tail" | grep -qE "Journal stopped|systemd-shutdow"; then
+    notice boot "🔵 Reinicio LIMPIO. Arrancó: $when"
+  else
+    local last_lines prev_end
+    prev_end=$(journalctl -b -1 --no-pager -n 1 -o short-iso 2>/dev/null | awk '{print $1}')
+    last_lines=$(journalctl -b -1 --no-pager -o short -p warning -n 8 2>/dev/null | cut -c1-160)
+    notice boot "🔴 REINICIO INESPERADO (corte de luz, cuelgue o watchdog). Arrancó: $when. Último registro del boot anterior: ${prev_end:-?}${NL}Últimos warnings:${NL}${last_lines}"
+  fi
+}
+
+check_temperature() {
+  local max=0 t f
+  for f in /sys/class/hwmon/hwmon*/temp*_input; do
+    [ -r "$f" ] || continue
+    grep -q coretemp "$(dirname "$f")/name" 2>/dev/null || continue
+    t=$(( $(cat "$f") / 1000 )); [ "$t" -gt "$max" ] && max=$t
+  done
+  [ "$max" -eq 0 ] && return
+  if [ "$max" -gt "$TEMP_THRESHOLD" ]; then
+    alert temp "🌡️ TEMPERATURA ALTA: CPU ${max}°C (umbral ${TEMP_THRESHOLD}°C)"
+  fi
+}
+
+check_disk() {
+  local line mp pct ipct
+  while read -r mp pct ipct; do
+    pct=${pct%\%}; ipct=${ipct%\%}
+    [ "$pct" -gt "$DISK_THRESHOLD" ] 2>/dev/null && \
+      alert "disk-${mp//\//_}" "💾 DISCO $mp al ${pct}% (umbral ${DISK_THRESHOLD}%)"
+    [ "$ipct" -gt "$INODE_THRESHOLD" ] 2>/dev/null && \
+      alert "inode-${mp//\//_}" "💾 INODOS $mp al ${ipct}% (umbral ${INODE_THRESHOLD}%)"
+  done < <(df -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs --output=target,pcent,ipcent | tail -n +2)
+}
+
+check_smart() {
+  command -v smartctl >/dev/null || return
+  local dev=/dev/sda health id val prev f="$STATE_DIR/smart-counters"
+  health=$(smartctl -H "$dev" 2>/dev/null | grep -iE "overall-health|SMART Health Status" | awk -F: '{gsub(/ /,"",$2); print $2}')
+  if [ -n "$health" ] && [ "$health" != "PASSED" ] && [ "$health" != "OK" ]; then
+    alert smart-health "🛑 SSD $dev: SMART health = $health. ¡Hacer backup YA!"
+  fi
+  # Contadores que sólo deberían subir si hay problemas:
+  # 5 realloc, 187 uncorrect, 196 realloc events, 197 pending, 198 offline uncorrect, 199 CRC (cable)
+  local changes=""
+  declare -A old
+  [ -f "$f" ] && while read -r id val; do old[$id]=$val; done < "$f"
+  : > "$f.new"
+  while read -r id name val; do
+    echo "$id $val" >> "$f.new"
+    prev=${old[$id]:-}
+    [ -n "$prev" ] && [ "$val" -gt "$prev" ] 2>/dev/null && changes+="${name}: ${prev}→${val}${NL}"
+  done < <(smartctl -A "$dev" 2>/dev/null | awk '$1 ~ /^(5|187|196|197|198|199)$/ {print $1, $2, $10}')
+  mv "$f.new" "$f"
+  [ -n "$changes" ] && notice smart "⚠️ SSD $dev: subieron contadores SMART de error:${NL}${changes}(199/CRC = cable SATA; 5/196/197 = sectores dañados)"
+}
+
+check_memory() {
+  local total avail swt swf apct spct
+  read -r total avail swt swf < <(awk '/^MemTotal/{t=$2}/^MemAvailable/{a=$2}/^SwapTotal/{st=$2}/^SwapFree/{sf=$2}END{print t,a,st,sf}' /proc/meminfo)
+  apct=$(( avail * 100 / total ))
+  [ "$apct" -lt "$MEM_AVAIL_MIN_PCT" ] && \
+    alert mem "🧠 RAM baja: disponible ${apct}% ($((avail/1024)) MB). Top: $(ps -eo comm,rss --sort=-rss --no-headers | head -3 | awk '{printf "%s %dMB; ", $1, $2/1024}')"
+  if [ "$swt" -gt 0 ]; then
+    spct=$(( (swt - swf) * 100 / swt ))
+    [ "$spct" -gt "$SWAP_USED_MAX_PCT" ] && alert swap "🧠 Swap usada ${spct}% ($(((swt-swf)/1024)) MB)"
+  fi
+}
+
+check_units() {
+  local failed
+  failed=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | paste -sd' ')
+  if [ -n "$failed" ]; then
+    alert units "🛑 Servicios systemd FALLIDOS: $failed"
+  else
+    clear_alert units
+  fi
+}
+
+check_watchdog() {
+  local st
+  st=$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null || echo "ausente")
+  [ "$st" != "active" ] && alert watchdog "⚠️ Watchdog de hardware no activo (estado: $st)"
+}
+
+check_network() {
+  local gw ok_gw=0 ok_net=0 ok_dns=0 down_f="$STATE_DIR/net-down-since" what=""
+  gw=$(ip -4 route show default | awk '{print $3; exit}')
+  [ -n "$gw" ] && ping -c 2 -W 3 "$gw" >/dev/null 2>&1 && ok_gw=1
+  ping -c 2 -W 3 "$PING_INTERNET" >/dev/null 2>&1 && ok_net=1
+  getent ahosts "$DNS_TEST_HOST" >/dev/null 2>&1 && ok_dns=1
+  if [ $ok_gw$ok_net$ok_dns = 111 ]; then
+    if [ -f "$down_f" ]; then
+      local since mins; since=$(cat "$down_f"); mins=$(( ($(date +%s) - since) / 60 ))
+      rm -f "$down_f"; clear_alert net
+      notice net "🟢 RED RECUPERADA tras ~${mins} min sin conexión completa"
+    fi
+    return
+  fi
+  [ -f "$down_f" ] || date +%s > "$down_f"
+  [ $ok_gw = 0 ] && what+="router(${gw:-sin ruta}) "
+  [ $ok_net = 0 ] && what+="internet($PING_INTERNET) "
+  [ $ok_dns = 0 ] && what+="DNS($DNS_TEST_HOST) "
+  alert net "📡 RED con problemas: no responde ${what}(skynet-netwatch intenta reparar el WiFi)"
+}
+
+check_docker() {
+  command -v docker >/dev/null 2>&1 || return
+  systemctl is-active --quiet docker || { alert docker "🐳 El servicio docker NO está activo"; return; }
+  local ids bad=""
+  ids=$(docker ps -aq 2>/dev/null); [ -z "$ids" ] && return
+  while read -r name policy status health; do
+    name=${name#/}
+    [ "$policy" = "no" ] && continue       # contenedores descartables: ignorar
+    if [ "$status" != "running" ] || [ "$health" = "unhealthy" ]; then
+      bad+="${name}=${status}${health:+/$health} "
+    fi
+  done < <(docker inspect -f '{{.Name}} {{.HostConfig.RestartPolicy.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $ids 2>/dev/null)
+  if [ -n "$bad" ]; then alert containers "🐳 Contenedores con problemas: $bad"; else clear_alert containers; fi
+}
+
+check_backup() {
+  # Si existe el directorio de backups de n8n, el último debe tener < 26 h
+  local d=/opt/backups/n8n newest age
+  [ -d "$d" ] || return
+  newest=$(ls -t "$d"/n8n-*.tar.gz 2>/dev/null | head -1)
+  if [ -z "$newest" ]; then alert backup "💾 No hay ningún backup de n8n en $d"; return; fi
+  age=$(( ($(date +%s) - $(stat -c %Y "$newest")) / 3600 ))
+  if [ "$age" -ge 26 ]; then alert backup "💾 Último backup de n8n tiene ${age} h ($(basename "$newest")). Ver: journalctl -t n8n-backup"; else clear_alert backup; fi
+}
+
+check_hardware() {
+  command -v ras-mc-ctl >/dev/null || return
+  local summary hash last
+  summary=$(ras-mc-ctl --summary 2>/dev/null) || return
+  hash=$(echo "$summary" | md5sum | cut -d' ' -f1)
+  last=$(cat "$STATE_DIR/last-hw-hash" 2>/dev/null || echo "")
+  echo "$hash" > "$STATE_DIR/last-hw-hash"
+  [ -z "$last" ] || [ "$hash" = "$last" ] && return
+  notice hardware "⚠️ NUEVO error de hardware (rasdaemon):${NL}$(ras-mc-ctl --errors 2>/dev/null | tail -10)"
+}
+
+check_kernel() {
+  # Errores de kernel nuevos desde la última corrida (incluye el final del boot anterior)
+  local cur="$STATE_DIR/kernel-cursor" new
+  if [ ! -f "$cur" ]; then journalctl -n 1 --cursor-file="$cur" >/dev/null 2>&1; return; fi
+  new=$(journalctl _TRANSPORT=kernel -p err --cursor-file="$cur" --no-pager -o short 2>/dev/null \
+        | grep -vE "^-- " | grep -vE "$KERNEL_IGNORE" | cut -c1-200)
+  [ -n "$new" ] && alert kernel "🐧 Errores de kernel nuevos ($(echo "$new" | wc -l)):${NL}$(echo "$new" | tail -8)"
+}
+
+# ---------- MAIN ----------
+if [ "${1:-}" = "--test" ]; then
+  notice test "✅ TEST — server-alerts operativo. $(date '+%F %T')"
+  [ -z "$TELEGRAM_BOT_TOKEN" ] && echo "(Telegram no configurado: sólo se registró en el log)"
+  exit 0
+fi
+
+check_boot
+check_temperature
+check_disk
+check_smart
+check_memory
+check_units
+check_watchdog
+check_network
+check_docker
+check_backup
+check_hardware
+check_kernel
+date '+%F %T' > "$STATE_DIR/last-run"

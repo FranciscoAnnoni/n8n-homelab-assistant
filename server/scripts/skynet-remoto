@@ -1,0 +1,78 @@
+#!/bin/bash
+# skynet-remoto — prende/apaga el acceso remoto por Tailscale (no corre 24/7).
+#   sudo skynet-remoto on            prende tailscaled + conecta; queda habilitado al arranque
+#                                    (si hay un corte de luz estando afuera, vuelve solo)
+#   sudo skynet-remoto off           desconecta + apaga + deshabilita tailscaled
+#   skynet-remoto status [--json]    estado (no requiere root)
+# La sesión queda guardada en /var/lib/tailscale: al volver a prender no pide login.
+#
+# Desde 2026-09-30 queda SIEMPRE encendido: Tailscale Funnel publica /webhook de n8n (bot de Telegram).
+# Versión fijada en 1.98.10 (apt-mark hold): 1.102.x rompe Funnel en Linux.
+#
+# Pensado para integrarse a futuro con un bot de Telegram (pendiente):
+#   - salida --json de una línea, estable, para que el bot la parsee
+#   - códigos de salida: 0 = OK · 1 = error · 2 = hace falta login (se imprime la URL) · 64 = uso
+#   - cada acción queda en el journal: journalctl -t skynet-remoto
+#   - SKYNET_REMOTO_ORIGEN=telegram (por ej.) queda registrado en el log; por defecto "consola"
+set -uo pipefail
+export LC_ALL=C.UTF-8
+ORIGEN=${SKYNET_REMOTO_ORIGEN:-consola}
+UP_FLAGS=(--hostname=skynet --ssh=false --accept-dns=false --timeout=45s)
+
+log() { logger -t skynet-remoto "[$ORIGEN] $*"; }
+need_root() { [ "$(id -u)" = 0 ] || { echo "Usar con sudo: sudo skynet-remoto $1" >&2; exit 64; }; }
+
+estado() {  # imprime: <servicio> <habilitado> <backend> <ip>
+  local svc en be="Stopped" ip=""
+  svc=$(systemctl is-active tailscaled 2>/dev/null); en=$(systemctl is-enabled tailscaled 2>/dev/null)
+  if [ "$svc" = active ]; then
+    be=$(tailscale status --json 2>/dev/null | jq -r '.BackendState // "Unknown"')
+    ip=$(tailscale ip -4 2>/dev/null | head -1)
+  fi
+  echo "${svc:-unknown} ${en:-unknown} $be ${ip:--}"
+}
+
+cmd_status() {
+  read -r svc en be ip < <(estado)
+  local on=false; [ "$be" = Running ] && on=true
+  if [ "${1:-}" = --json ]; then
+    jq -cn --argjson on $on --arg svc "$svc" --arg en "$en" --arg be "$be" --arg ip "$ip" \
+      '{remoto:$on, servicio:$svc, arranque:$en, backend:$be, ip:(if $ip=="-" then null else $ip end), host:"skynet"}'
+  elif $on; then
+    local fun="sin Funnel"
+    tailscale serve status --json 2>/dev/null | jq -e '(.AllowFunnel // {}) | length > 0' >/dev/null && fun="Funnel ON (webhooks públicos /webhook)"
+    echo "Remoto: ENCENDIDO — skynet = $ip (ssh franc@skynet · http://skynet:5678) · $fun"
+  else
+    echo "Remoto: APAGADO (tailscaled $svc, arranque $en, estado $be)"
+  fi
+}
+
+cmd_on() {
+  need_root on
+  systemctl enable --now tailscaled >/dev/null 2>&1 || { log "on: no arrancó tailscaled"; echo "ERROR: no arrancó tailscaled" >&2; exit 1; }
+  local out rc
+  out=$(tailscale up "${UP_FLAGS[@]}" 2>&1); rc=$?
+  if [ $rc -ne 0 ]; then
+    local url; url=$(grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' <<<"$out" | head -1)
+    if [ -n "$url" ]; then log "on: requiere login $url"; echo "Hace falta login: $url"; exit 2; fi
+    log "on: falló tailscale up: $out"; echo "ERROR: $out" >&2; exit 1
+  fi
+  log "on: remoto encendido ($(tailscale ip -4 | head -1))"
+  cmd_status
+}
+
+cmd_off() {
+  need_root off
+  echo "OJO: apagar Tailscale también apaga Funnel → el bot de Telegram (webhook) deja de recibir mensajes." >&2
+  tailscale down >/dev/null 2>&1 || true
+  systemctl disable --now tailscaled >/dev/null 2>&1
+  log "off: remoto apagado"
+  cmd_status
+}
+
+case "${1:-status}" in
+  on)     cmd_on ;;
+  off)    cmd_off ;;
+  status) cmd_status "${2:-}" ;;
+  *)      echo "Uso: skynet-remoto on|off|status [--json]" >&2; exit 64 ;;
+esac

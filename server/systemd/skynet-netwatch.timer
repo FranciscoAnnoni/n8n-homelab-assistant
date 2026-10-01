@@ -1,0 +1,10 @@
+[Unit]
+Description=skynet: chequeo de red cada 5 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

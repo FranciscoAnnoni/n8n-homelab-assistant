@@ -1,0 +1,101 @@
+{
+  "name": "Resumen diario tareas 10:00",
+  "description": "",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Todos los días 10:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "b1000000-0000-4000-8000-000000000001"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*) AS n, coalesce(string_agg('#' || id || ' ' || text, E'\\n' ORDER BY id), '') AS lista FROM tasks",
+        "options": {}
+      },
+      "name": "Leer pendientes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURAR",
+          "name": "Postgres tareas"
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000002"
+    },
+    {
+      "parameters": {
+        "chatId": "TU_CHAT_ID",
+        "text": "={{ (Number($json.n) === 0 ? 'Buen día! No tenés tareas pendientes.' : 'Buen día! Pendientes de hoy (' + $json.n + '/20):\\n\\n' + $json.lista + (Number($json.n) >= 20 ? '\\n\\nEstás en el tope de 20. Tenés que resolver algunas antes de agregar más.' : '')).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "name": "Enviar resumen",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CONFIGURAR",
+          "name": "Telegram account"
+        }
+      },
+      "id": "b1000000-0000-4000-8000-000000000003",
+      "webhookId": "850952c1-ec5b-46e9-9903-3dd59da210c8"
+    }
+  ],
+  "connections": {
+    "Todos los días 10:00": {
+      "main": [
+        [
+          {
+            "node": "Leer pendientes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer pendientes": {
+      "main": [
+        [
+          {
+            "node": "Enviar resumen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all"
+  }
+}
