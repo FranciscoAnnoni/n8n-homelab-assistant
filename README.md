@@ -2,6 +2,8 @@
 
 Asistente personal por Telegram que entiende **texto y notas de voz**, conversa sobre cualquier tema y administra una **lista de tareas** guardada en Postgres. Todo corre en un servidor casero (una PC vieja reciclada) con **n8n en Docker**, sin puertos abiertos en el router y con **costo cero**.
 
+![Arquitectura de Skynet](docs/img/arquitectura.png)
+
 ![Workflow principal en n8n](docs/img/workflow-asistente.png)
 
 ## Qué hace
